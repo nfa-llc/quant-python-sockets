@@ -33,7 +33,7 @@ from decompression_utils import (
 # Using your provided key as default
 API_KEY = os.environ.get("GEXBOT_API_KEY", "")
 
-BASE_URL = "https://api.gexbot.com"
+BASE_URL = "https://api.gexbot.com/v2"
 NEGOTIATE_URL = f"{BASE_URL}/negotiate"
 
 # --- USER SELECTION: Uncomment the feeds you want to subscribe to ---
@@ -92,7 +92,7 @@ ACTIVE_TICKERS = [
 
 # Select categories for the 'classic' hub
 ACTIVE_CLASSIC_CATEGORIES = [
-    # "gex_full",
+    "gex_full",
     # "gex_zero",
     # "gex_one",
 ]
@@ -108,7 +108,7 @@ ACTIVE_STATE_GEX_CATEGORIES = [
 ACTIVE_STATE_GREEKS_ZERO_CATEGORIES = [
     # "volume_zero",
     # "delta_zero",
-    # "gamma_zero",
+    "gamma_zero",
     # "vanna_zero",
     # "charm_zero",
 ]
@@ -223,7 +223,7 @@ class WebPubSubClientManager:
                 orderflow_data = decompress_orderflow_message(any_message)
                 if orderflow_data:
                     print(
-                        f"[{self.hub_key}] Orderflow: {orderflow_data.get('ticker')}")
+                        f"[{self.hub_key}] Orderflow: {orderflow_data.get('spot')}")
 
             else:
                 print(f"  Unknown message type_url: {message_type_url}")

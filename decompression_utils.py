@@ -144,60 +144,53 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
 
 
 def decompress_orderflow_message(any_message: any_pb2.Any) -> Dict:
-    """
-    Decompresses and decodes a ZSTD-compressed Orderflow message from a google.protobuf.Any.
-    """
-    # 1. Decompress the raw bytes
     compressed_bytes = any_message.value
     with DCTX.stream_reader(compressed_bytes) as reader:
         decompressed_bytes = reader.read()
 
-    # 2. Decode the Orderflow Protobuf data
-    decoded_proto = orderflow_pb2.Orderflow()
-    decoded_proto.ParseFromString(decompressed_bytes)
+    p = orderflow_pb2.Orderflow()
+    p.ParseFromString(decompressed_bytes)
 
-    # 3. Convert Protobuf Orderflow to Python Dict, applying inverse multiplications
-    orderflow_data = {
-        "timestamp": decoded_proto.timestamp,
-        "ticker": decoded_proto.ticker,
-        "spot": (decoded_proto.spot or 0) / 100.0,
-        "zero_major_long_gamma": (decoded_proto.zero_major_long_gamma or 0) / 100.0,
-        "zero_major_short_gamma": (decoded_proto.zero_major_short_gamma or 0) / 100.0,
-        "one_major_long_gamma": (decoded_proto.one_major_long_gamma or 0) / 100.0,
-        "one_major_short_gamma": (decoded_proto.one_major_short_gamma or 0) / 100.0,
-        "zero_major_call_gamma": (decoded_proto.zero_major_call_gamma or 0) / 100.0,
-        "zero_major_put_gamma": (decoded_proto.zero_major_put_gamma or 0) / 100.0,
-        "one_major_call_gamma": (decoded_proto.one_major_call_gamma or 0) / 100.0,
-        "one_major_put_gamma": (decoded_proto.one_major_put_gamma or 0) / 100.0,
+    return {
+        "timestamp": p.timestamp,
+        "ticker": p.ticker,
+        "spot": (p.spot or 0) / 100.0,
+        "zero_major_long_gamma":  (p.zero_major_long_gamma or 0) / 100.0,
+        "zero_major_short_gamma": (p.zero_major_short_gamma or 0) / 100.0,
+        "one_major_long_gamma":   (p.one_major_long_gamma or 0) / 100.0,
+        "one_major_short_gamma":  (p.one_major_short_gamma or 0) / 100.0,
+        "zero_major_call_gamma":  (p.zero_major_call_gamma or 0) / 100.0,
+        "zero_major_put_gamma":   (p.zero_major_put_gamma or 0) / 100.0,
+        "one_major_call_gamma":   (p.one_major_call_gamma or 0) / 100.0,
+        "one_major_put_gamma":    (p.one_major_put_gamma or 0) / 100.0,
 
-        # State fields (sint32, no multiplier)
-        "zero_convexity_ratio": decoded_proto.zero_convexity_ratio,
-        "one_convexity_ratio": decoded_proto.one_convexity_ratio,
-        "zero_gex_ratio": decoded_proto.zero_gex_ratio,
-        "one_gex_ratio": decoded_proto.one_gex_ratio,
-        "zero_net_vanna": decoded_proto.zero_net_vanna,
-        "one_net_vanna": decoded_proto.one_net_vanna,
-        "zero_net_charm": decoded_proto.zero_net_charm,
-        "one_net_charm": decoded_proto.one_net_charm,
-        "zero_agg_total_dex": decoded_proto.zero_agg_total_dex,
-        "one_agg_total_dex": decoded_proto.one_agg_total_dex,
-        "zero_agg_call_dex": decoded_proto.zero_agg_call_dex,
-        "one_agg_call_dex": decoded_proto.one_agg_call_dex,
-        "zero_agg_put_dex": decoded_proto.zero_agg_put_dex,
-        "one_agg_put_dex": decoded_proto.one_agg_put_dex,
-        "zero_net_total_dex": decoded_proto.zero_net_total_dex,
-        "one_net_total_dex": decoded_proto.one_net_total_dex,
-        "zero_net_call_dex": decoded_proto.zero_net_call_dex,
-        "one_net_call_dex": decoded_proto.one_net_call_dex,
-        "zero_net_put_dex": decoded_proto.zero_net_put_dex,
-        "one_net_put_dex": decoded_proto.one_net_put_dex,
+        # state — all x100 on the wire
+        "zero_convexity_ratio": p.zero_convexity_ratio / 100.0,
+        "one_convexity_ratio":  p.one_convexity_ratio / 100.0,
+        "zero_gex_ratio":       p.zero_gex_ratio / 100.0,
+        "one_gex_ratio":        p.one_gex_ratio / 100.0,
+        "zero_net_vanna":       p.zero_net_vanna / 100.0,
+        "one_net_vanna":        p.one_net_vanna / 100.0,
+        "zero_net_charm":       p.zero_net_charm / 100.0,
+        "one_net_charm":        p.one_net_charm / 100.0,
+        "zero_agg_total_dex":   p.zero_agg_total_dex / 100.0,
+        "one_agg_total_dex":    p.one_agg_total_dex / 100.0,
+        "zero_agg_call_dex":    p.zero_agg_call_dex / 100.0,
+        "one_agg_call_dex":     p.one_agg_call_dex / 100.0,
+        "zero_agg_put_dex":     p.zero_agg_put_dex / 100.0,
+        "one_agg_put_dex":      p.one_agg_put_dex / 100.0,
+        "zero_net_total_dex":   p.zero_net_total_dex / 100.0,
+        "one_net_total_dex":    p.one_net_total_dex / 100.0,
+        "zero_net_call_dex":    p.zero_net_call_dex / 100.0,
+        "one_net_call_dex":     p.one_net_call_dex / 100.0,
+        "zero_net_put_dex":     p.zero_net_put_dex / 100.0,
+        "one_net_put_dex":      p.one_net_put_dex / 100.0,
 
-        # Orderflow fields (sint32, no multiplier)
-        "dex_orderflow": decoded_proto.dex_orderflow,
-        "gex_orderflow": decoded_proto.gex_orderflow,
-        "convexity_orderflow": decoded_proto.convexity_orderflow,
-        "one_dex_orderflow": decoded_proto.one_dex_orderflow,
-        "one_gex_orderflow": decoded_proto.one_gex_orderflow,
-        "one_convexity_orderflow": decoded_proto.one_convexity_orderflow,
+        # orderflow — also x100 on the wire
+        "dex_orderflow":           p.dex_orderflow / 100.0,
+        "gex_orderflow":           p.gex_orderflow / 100.0,
+        "convexity_orderflow":     p.convexity_orderflow / 100.0,
+        "one_dex_orderflow":       p.one_dex_orderflow / 100.0,
+        "one_gex_orderflow":       p.one_gex_orderflow / 100.0,
+        "one_convexity_orderflow": p.one_convexity_orderflow / 100.0,
     }
-    return orderflow_data
