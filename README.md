@@ -73,8 +73,15 @@ This client reads data from Protobuf messages. You must compile the source `.pro
     export GEXBOT_API_KEY="your_api_key_here"
     ```
 
-2.  **Configure Subscriptions**
-    Open `main.py` and edit the "USER SELECTION" section (lines 70-137) to subscribe to your desired tickers and data feeds. Uncomment or add items to:
+2.  **Set User-Agent**
+    The API requires a `User-Agent` header that identifies your client application. Open `main.py` and replace the empty `USER_AGENT` value before running the script.
+
+    ```python
+    USER_AGENT = "YourClientApp/1.0"
+    ```
+
+3.  **Configure Subscriptions**
+    Open `main.py` and edit the "USER SELECTION" section to subscribe to your desired tickers and data feeds. Uncomment or add items to:
     * `ACTIVE_TICKERS`
     * `ACTIVE_CLASSIC_CATEGORIES`
     * `ACTIVE_STATE_GEX_CATEGORIES`
