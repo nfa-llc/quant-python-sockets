@@ -31,9 +31,14 @@ from decompression_utils import (
 
 # Get API key from an environment variable for security.
 # Using your provided key as default
-API_KEY = os.environ.get("GEXBOT_API_KEY", "")
+API_KEY = os.environ.get(
+    "GEXBOT_API_KEY", "")
 
-BASE_URL = "https://api.gexbot.com/v2"
+# Required by the Gexbot API. Replace this with a value that identifies your
+# client application before running the script.
+USER_AGENT = ""
+
+BASE_URL = "https://api.gex.bot/v2"
 NEGOTIATE_URL = f"{BASE_URL}/negotiate"
 
 # --- USER SELECTION: Uncomment the feeds you want to subscribe to ---
@@ -234,7 +239,7 @@ class WebPubSubClientManager:
 
 # --- Negotiation Function ---
 
-def get_negotiate_response(api_key: str) -> Optional[Dict]:
+def get_negotiate_response(api_key: str, user_agent: str) -> Optional[Dict]:
     """
     Hits the /negotiate endpoint using an API key for authentication.
     """
@@ -242,7 +247,16 @@ def get_negotiate_response(api_key: str) -> Optional[Dict]:
         print("Error: GEXBOT_API_KEY is not set.")
         return None
 
-    headers = {"Authorization": f"Basic {api_key}"}
+    user_agent = user_agent.strip()
+    if not user_agent:
+        print("Error: USER_AGENT must be set in main.py before running this script.")
+        print('Example: USER_AGENT = "AcmeQuantClient/1.0"')
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": user_agent,
+    }
     print(f"Connecting to {NEGOTIATE_URL}...")
 
     try:
@@ -257,7 +271,7 @@ def get_negotiate_response(api_key: str) -> Optional[Dict]:
 
 # --- Main Script ---
 if __name__ == "__main__":
-    negotiate_data = get_negotiate_response(API_KEY)
+    negotiate_data = get_negotiate_response(API_KEY, USER_AGENT)
 
     if not (negotiate_data and 'websocket_urls' in negotiate_data):
         print("\n--- Negotiation Failed or 'websocket_urls' key missing ---")
