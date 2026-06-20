@@ -35,7 +35,7 @@ API_KEY = os.environ.get("GEXBOT_API_DEV_KEY", "")
 # client application before running the script.
 USER_AGENT = os.environ.get("GEXBOT_USER_AGENT", "")
 
-BASE_URL = "https://dev-api.gex.bot/v2"
+BASE_URL = "https://api.gex.bot/v2"
 NEGOTIATE_URL = f"{BASE_URL}/negotiate"
 
 # --- USER SELECTION: Uncomment the feeds you want to subscribe to ---
