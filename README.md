@@ -1,50 +1,32 @@
 # Gexbot Real-Time Data Client (Python)
 
-This toy client demonstrates how API Quant users connect to Gexbot real-time sockets:
+This toy client demonstrates the current API WebSocket flow for Quant users:
 
-1. Build the unprefixed websocket groups you want, e.g. `ES_SPX_classic_gex_full`.
-2. `POST /v2/negotiate` with `{"groups": [...]}`.
-3. Open the returned Azure Web PubSub URLs. The negotiated token already includes the requested groups, so the client does **not** call `join_group`.
+1. `POST /v2/negotiate` with the initial unprefixed groups you want.
+2. Connect to the returned Azure Web PubSub hub URLs.
+3. `PATCH /v2/negotiate` with a complete replacement group set to modify subscriptions without reconnecting.
 
 ## Project Structure
 
 ```
 .
-├── proto/                  # Source .proto definitions (e.g., gex.proto)
+├── proto/                  # Source .proto definitions
 ├── generated_proto/        # Compiled _pb2.py files
 ├── main.py                 # Main client script
 ├── decompression_utils.py  # Decompression helper functions
 ├── requirements.txt        # Python dependencies
-├── .gitignore
 └── README.md
 ```
 
----
+## 1. Setup
 
-## 1. Setup and Installation
-
-1. **Clone Repository**
-   Clone this repository to your local machine.
-
-2. **Create Virtual Environment**
-   It's highly recommended to use a virtual environment.
-
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install Dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
----
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
 
 ## 2. Compile Protobuf Definitions
-
-This client reads data from Protobuf messages. Compile the source `.proto` files in `proto/` into Python modules.
 
 ```bash
 mkdir -p generated_proto
@@ -52,27 +34,20 @@ touch generated_proto/__init__.py
 python3 -m grpc_tools.protoc -I=proto --python_out=generated_proto --pyi_out=generated_proto proto/*.proto
 ```
 
----
-
 ## 3. Configuration
-
-Set the required environment variables:
 
 ```bash
 export GEXBOT_API_KEY="your_api_key_here"
 export GEXBOT_USER_AGENT="YourClientApp/1.0"
+export BASE_URL="https://api.gex.bot/v2"
 ```
 
-Then open `main.py` and edit the **USER SELECTION** section:
+Edit these dictionaries near the top of `main.py`:
 
-- `ACTIVE_TICKERS`
-- `ACTIVE_CLASSIC_CATEGORIES`
-- `ACTIVE_STATE_GEX_CATEGORIES`
-- `ACTIVE_STATE_GREEKS_ZERO_CATEGORIES`
-- `ACTIVE_STATE_GREEKS_ONE_CATEGORIES`
-- `ACTIVE_ORDERFLOW_CATEGORIES`
+- `INITIAL_GROUP_CONFIG` — groups sent to `POST /v2/negotiate`
+- `UPDATED_GROUP_CONFIG` — replacement groups sent to `PATCH /v2/negotiate`
 
-Groups sent to negotiate are as follows:
+Group names are unprefixed:
 
 ```text
 {ticker}_{package}_{category}
@@ -82,13 +57,42 @@ Examples:
 
 ```text
 SPX_classic_gex_full
-ES_SPX_state_gamma_zero
-SPX_orderflow_orderflow
+SPX_state_gamma_zero
+ES_SPX_orderflow_orderflow
 ```
 
----
+## 4. POST Negotiate
 
-## 4. Run the Client
+`main.py` sends:
+
+```json
+{
+  "groups": [
+    "SPX_state_gex_full",
+    "SPX_state_gamma_zero"
+  ]
+}
+```
+
+The response includes all authorized hub URLs. Initial groups are auto-joined by the server; the client does not call `join_group`.
+
+## 5. PATCH Replace Groups
+
+After connecting, `main.py` waits briefly, then sends a full replacement request:
+
+```json
+{
+  "groups": [
+    { "hub": "classic", "group": "SPX_classic_gex_full" },
+    { "hub": "state_gex", "group": "NDX_state_gex_full" },
+    { "hub": "state_greeks_zero", "group": "SPX_state_gamma_zero" }
+  ]
+}
+```
+
+PATCH is a full replacement. Any active group omitted from the PATCH payload is removed.
+
+## 6. Run
 
 ```bash
 python main.py
