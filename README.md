@@ -13,6 +13,7 @@ This toy client demonstrates the current API WebSocket flow for Quant users:
 ├── proto/                  # Source .proto definitions
 ├── generated_proto/        # Compiled _pb2.py files
 ├── main.py                 # Main client script
+├── group_limit_test.py     # WebSocket group limit smoke test
 ├── decompression_utils.py  # Decompression helper functions
 ├── requirements.txt        # Python dependencies
 └── README.md
@@ -59,6 +60,42 @@ Examples:
 SPX_classic_gex_full
 SPX_state_gamma_zero
 ES_SPX_orderflow_orderflow
+```
+
+### Possible Groups
+
+Use any supported ticker in place of `{ticker}`.
+
+Get the current supported ticker list at: https://api.gex.bot/tickers
+
+#### Classic
+
+```text
+{ticker}_classic_gex_full
+{ticker}_classic_gex_zero
+{ticker}_classic_gex_one
+```
+
+#### State
+
+```text
+{ticker}_state_gex_full
+{ticker}_state_gex_zero
+{ticker}_state_gex_one
+{ticker}_state_delta_zero
+{ticker}_state_delta_one
+{ticker}_state_gamma_zero
+{ticker}_state_gamma_one
+{ticker}_state_vanna_zero
+{ticker}_state_vanna_one
+{ticker}_state_charm_zero
+{ticker}_state_charm_one
+```
+
+#### Orderflow
+
+```text
+{ticker}_orderflow_orderflow
 ```
 
 ## 4. POST Negotiate
