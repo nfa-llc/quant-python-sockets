@@ -1,7 +1,17 @@
+# /// script
+# dependencies = [
+#   "azure-messaging-webpubsubclient==1.1.0",
+#   "protobuf==6.33.1",
+#   "requests==2.32.5",
+#   "zstandard==0.25.0",
+# ]
+# ///
+
 import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
@@ -21,6 +31,28 @@ from decompression_utils import (
 )
 
 # --- Configuration ---
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def load_dotenv_file(path: Path) -> None:
+    """Load local environment variables without requiring an extra dependency."""
+    if not path.exists():
+        return
+
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+load_dotenv_file(SCRIPT_DIR / ".env")
 
 API_KEY = os.environ.get("GEXBOT_API_KEY", "")
 USER_AGENT = os.environ.get("GEXBOT_USER_AGENT", "")

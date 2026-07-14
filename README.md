@@ -1,6 +1,6 @@
 # Gexbot Real-Time Data Client (Python)
 
-This toy client demonstrates the current API WebSocket flow for Quant users:
+This repository demonstrates the current API WebSocket flow for Quant users:
 
 1. `POST /v2/negotiate` with the initial unprefixed groups you want.
 2. Connect to the returned Azure Web PubSub hub URLs.
@@ -13,7 +13,7 @@ This toy client demonstrates the current API WebSocket flow for Quant users:
 ├── proto/                  # Source .proto definitions
 ├── generated_proto/        # Compiled _pb2.py files
 ├── main.py                 # Main client script
-├── group_limit_test.py     # WebSocket group limit smoke test
+├── multi.py                # Quant discovery, Classic GEX, and State gamma example
 ├── decompression_utils.py  # Decompression helper functions
 ├── requirements.txt        # Python dependencies
 └── README.md
@@ -66,7 +66,19 @@ ES_SPX_orderflow_orderflow
 
 Use any supported ticker in place of `{ticker}`.
 
-Get the current supported ticker list at: https://api.gex.bot/tickers
+Get the current supported ticker list at: https://api.gex.bot/v2/tickers
+
+Get package categories at:
+
+```text
+GET https://api.gex.bot/classic/categories
+GET https://api.gex.bot/state/categories
+GET https://api.gex.bot/orderflow/categories
+```
+
+Additional Quant tickers can be discovered at: https://api.gex.bot/tickers/quant
+
+These supplemental Quant tickers are WebSocket/PubSub-only. They can publish realtime WebSocket groups, but they are not REST chart/history endpoints. The response separates `stocks` and `indexes`; `XSP` is returned under `indexes`.
 
 #### Classic
 
@@ -97,6 +109,35 @@ Get the current supported ticker list at: https://api.gex.bot/tickers
 ```text
 {ticker}_orderflow_orderflow
 ```
+
+#### Explicit Expirations
+
+Discover all valid expiration dates within the published 90-day horizon with:
+
+```text
+GET https://api.gex.bot/v2/options/{ticker}/expiries
+```
+
+Convert returned `YYYY-MM-DD` dates to `YYYYMMDD` group suffixes:
+
+```text
+{ticker}_classic_gex_YYYYMMDD
+{ticker}_state_gex_YYYYMMDD
+{ticker}_state_delta_YYYYMMDD
+{ticker}_state_gamma_YYYYMMDD
+{ticker}_state_vanna_YYYYMMDD
+{ticker}_state_charm_YYYYMMDD
+{ticker}_orderflow_YYYYMMDD
+```
+
+Hub mapping for explicit expiration groups:
+
+- `classic` for `{ticker}_classic_gex_YYYYMMDD`
+- `state_gex` for `{ticker}_state_gex_YYYYMMDD`
+- `state_greeks` for expiration delta/gamma/vanna/charm groups
+- `orderflow` for `{ticker}_orderflow_YYYYMMDD`
+
+Explicit expiration groups are realtime-only, publish at a lower cadence than standard groups, and use canonical option-owning tickers such as `SPX`, `NDX`, `SPY`, `QQQ`, supplemental Quant stock tickers, or the supplemental `XSP` index.
 
 ## 4. POST Negotiate
 
@@ -133,4 +174,23 @@ PATCH is a full replacement. Any active group omitted from the PATCH payload is 
 
 ```bash
 python main.py
+```
+
+## 7. Quant Discovery Example
+
+`multi.py` demonstrates a standard Quant discovery flow:
+
+1. Query `/v2/tickers` and select `SPX` and `NDX`.
+2. Confirm `gex_full` from `/classic/categories`, plus `gex_full` and `gamma_zero` from `/state/categories`.
+3. Query `https://api.gex.bot/tickers/quant` and select the first five Quant tickers.
+4. Query `/v2/options/{ticker}/expiries` for those Quant tickers.
+5. Subscribe every selected ticker to Classic `gex_full` and State `gex_full`.
+6. Subscribe to standard State `gamma_zero` on `state_greeks_zero` for SPX/NDX and explicit `gamma_YYYYMMDD` groups on `state_greeks` for the next three valid Quant expirations.
+
+Classic messages display only `zero_gamma`. State GEX messages display `major_positive` and `major_negative` from the payload's `major_pos_vol` and `major_neg_vol` fields. State gamma option-profile messages display `major_long_gamma` and `major_short_gamma`.
+
+With two standard tickers, five Quant tickers, and three expirations per Quant ticker, this selects 31 of the 150 permitted groups.
+
+```bash
+python multi.py
 ```
