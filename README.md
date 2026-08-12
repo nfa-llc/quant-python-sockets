@@ -1,21 +1,36 @@
-# Gexbot Real-Time Data Client (Python)
+# Gexbot real-time data client for Python
 
-This repository demonstrates the current API WebSocket flow for Quant users:
+This repository demonstrates the second-generation (V2) WebSocket flow for Quant users.
 
-1. `POST /v2/negotiate` with the initial unprefixed groups you want.
-2. Connect to the returned Azure Web PubSub hub URLs.
-3. `PATCH /v2/negotiate` with a complete replacement group set to modify subscriptions without reconnecting.
+V2 sends analytics and spot as separate messages.
+Each ticker needs:
 
-## Project Structure
+- One analytics group for each selected package and category.
+- One `{ticker}_spot` group on each V2 hub that carries analytics for that ticker.
 
-```
+Analytics and spot use separate group memberships on the same Azure Web PubSub connection.
+
+The client flow is:
+
+1. Send unprefixed analytics groups and one unprefixed spot group per ticker to `POST /v2/negotiate`.
+2. Connect to the returned `v2_*` hub URLs.
+3. Decode analytics and `proto.spot` messages separately.
+4. Use the ticker and timestamp to correlate analytics with spot when the application needs one combined record.
+5. Send the complete hub-qualified membership set to `PATCH /v2/negotiate` when subscriptions change.
+
+## Project structure
+
+```text
 .
-├── proto/                  # Source .proto definitions
-├── generated_proto/        # Compiled _pb2.py files
-├── main.py                 # Main client script
-├── multi.py                # Quant discovery, Classic GEX, and State gamma example
-├── decompression_utils.py  # Decompression helper functions
-├── requirements.txt        # Python dependencies
+├── proto/                  # Source protobuf definitions
+├── generated_proto/        # Locally generated Python protobuf files
+├── main.py                 # POST and PATCH V2 example
+├── multi.py                # Quant discovery and multi-ticker V2 example
+├── group_config.py              # Colocated spot-group payload helpers
+├── decompression_utils.py       # Analytics and spot decompression helpers
+├── test_group_config.py         # Group payload tests
+├── test_decompression_utils.py  # Spot wire-contract tests
+├── requirements.txt             # Python dependencies
 └── README.md
 ```
 
@@ -27,15 +42,24 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 2. Compile Protobuf Definitions
+## 2. Compile protobuf definitions
 
 ```bash
 mkdir -p generated_proto
 touch generated_proto/__init__.py
-python3 -m grpc_tools.protoc -I=proto --python_out=generated_proto --pyi_out=generated_proto proto/*.proto
+python3 -m grpc_tools.protoc \
+  -I=proto \
+  --python_out=generated_proto \
+  --pyi_out=generated_proto \
+  proto/*.proto
 ```
 
+The generated files are not committed.
+Run this command after each protobuf change.
+
 ## 3. Configuration
+
+Set all required environment variables.
 
 ```bash
 export GEXBOT_API_KEY="your_api_key_here"
@@ -43,15 +67,37 @@ export GEXBOT_USER_AGENT="YourClientApp/1.0"
 export BASE_URL="https://api.gex.bot/v2"
 ```
 
-Edit these dictionaries near the top of `main.py`:
+The scripts also load these exact names from `quant-sockets/.env`.
 
-- `INITIAL_GROUP_CONFIG` — groups sent to `POST /v2/negotiate`
-- `UPDATED_GROUP_CONFIG` — replacement groups sent to `PATCH /v2/negotiate`
+Edit these analytics dictionaries near the top of `main.py`:
 
-Group names are unprefixed:
+- `INITIAL_ANALYTICS_GROUP_CONFIG`
+- `UPDATED_ANALYTICS_GROUP_CONFIG`
+
+Use V2 hub names as dictionary keys:
+
+```text
+v2_classic
+v2_state_gex
+v2_state_greeks_zero
+v2_state_greeks_one
+v2_state_greeks
+v2_orderflow
+```
+
+Configure analytics groups only.
+`group_config.py` adds the required spot groups.
+
+Analytics groups use this unprefixed shape:
 
 ```text
 {ticker}_{package}_{category}
+```
+
+Spot groups use this unprefixed shape:
+
+```text
+{ticker}_spot
 ```
 
 Examples:
@@ -60,15 +106,22 @@ Examples:
 SPX_classic_gex_full
 SPX_state_gamma_zero
 ES_SPX_orderflow_orderflow
+SPX_spot
+ES_SPX_spot
 ```
 
-### Possible Groups
+The server adds the configured color prefix before it joins a group.
+Do not add that prefix to a request.
 
-Use any supported ticker in place of `{ticker}`.
+## 4. Supported groups
 
-Get the current supported ticker list at: https://api.gex.bot/v2/tickers
+Get the current ticker list from:
 
-Get package categories at:
+```text
+GET https://api.gex.bot/v2/tickers
+```
+
+Get package categories from:
 
 ```text
 GET https://api.gex.bot/classic/categories
@@ -76,11 +129,17 @@ GET https://api.gex.bot/state/categories
 GET https://api.gex.bot/orderflow/categories
 ```
 
-Additional Quant tickers can be discovered at: https://api.gex.bot/tickers/quant
+Get supplemental Quant tickers from:
 
-These supplemental Quant tickers are WebSocket/PubSub-only. They can publish realtime WebSocket groups, but they are not REST chart/history endpoints. The response separates `stocks` and `indexes`; `XSP` is returned under `indexes`.
+```text
+GET https://api.gex.bot/tickers/quant
+```
 
-#### Classic
+Supplemental Quant tickers are WebSocket-only.
+A V2 request must still include each matching spot-group membership.
+A live spot message is available only when the publisher provides spot for that ticker.
+
+### Classic
 
 ```text
 {ticker}_classic_gex_full
@@ -88,7 +147,7 @@ These supplemental Quant tickers are WebSocket/PubSub-only. They can publish rea
 {ticker}_classic_gex_one
 ```
 
-#### State
+### State
 
 ```text
 {ticker}_state_gex_full
@@ -104,21 +163,21 @@ These supplemental Quant tickers are WebSocket/PubSub-only. They can publish rea
 {ticker}_state_charm_one
 ```
 
-#### Orderflow
+### Orderflow
 
 ```text
 {ticker}_orderflow_orderflow
 ```
 
-#### Explicit Expirations
+### Explicit expirations
 
-Discover all valid expiration dates within the published 90-day horizon with:
+Discover valid expiration dates within the published 90-day horizon:
 
 ```text
 GET https://api.gex.bot/v2/options/{ticker}/expiries
 ```
 
-Convert returned `YYYY-MM-DD` dates to `YYYYMMDD` group suffixes:
+Convert `YYYY-MM-DD` to `YYYYMMDD` for the group suffix:
 
 ```text
 {ticker}_classic_gex_YYYYMMDD
@@ -130,67 +189,144 @@ Convert returned `YYYY-MM-DD` dates to `YYYYMMDD` group suffixes:
 {ticker}_orderflow_YYYYMMDD
 ```
 
-Hub mapping for explicit expiration groups:
+Use these V2 hubs:
 
-- `classic` for `{ticker}_classic_gex_YYYYMMDD`
-- `state_gex` for `{ticker}_state_gex_YYYYMMDD`
-- `state_greeks` for expiration delta/gamma/vanna/charm groups
-- `orderflow` for `{ticker}_orderflow_YYYYMMDD`
+- `v2_classic` for Classic GEX.
+- `v2_state_gex` for State GEX.
+- `v2_state_greeks` for explicit State Greek expirations.
+- `v2_orderflow` for explicit Orderflow expirations.
 
-Explicit expiration groups are realtime-only, publish at a lower cadence than standard groups, and use canonical option-owning tickers such as `SPX`, `NDX`, `SPY`, `QQQ`, supplemental Quant stock tickers, or the supplemental `XSP` index.
+Explicit expiration groups are real-time only.
+They publish at a lower cadence than standard groups.
 
-## 4. POST Negotiate
+## 5. POST negotiation
 
-`main.py` sends:
+`POST /v2/negotiate` accepts unqualified group names.
+Send each analytics group and one spot name per unique ticker.
+
+Example:
 
 ```json
 {
   "groups": [
     "SPX_state_gex_full",
-    "SPX_state_gamma_zero"
+    "SPX_state_gamma_zero",
+    "SPX_spot"
   ]
 }
 ```
 
-The response includes all authorized hub URLs. Initial groups are auto-joined by the server; the client does not call `join_group`.
+The presence of complete matching spot groups selects the V2 hubs.
+The backend places `SPX_spot` on both selected V2 hubs.
+Initial analytics and spot memberships are joined by the server.
+Do not call Azure `joinGroup` for this flow.
 
-## 5. PATCH Replace Groups
+The response returns URLs with V2 keys such as:
 
-After connecting, `main.py` waits briefly, then sends a full replacement request:
+```text
+v2_classic
+v2_state_gex
+v2_state_greeks_zero
+v2_state_greeks_one
+v2_state_greeks
+v2_orderflow
+```
+
+## 6. PATCH replacement
+
+`PATCH /v2/negotiate` is a full replacement.
+It requires explicit hub names.
+Repeat the ticker spot group on each V2 hub that has analytics for that ticker.
+
+Example:
 
 ```json
 {
   "groups": [
-    { "hub": "classic", "group": "SPX_classic_gex_full" },
-    { "hub": "state_gex", "group": "NDX_state_gex_full" },
-    { "hub": "state_greeks_zero", "group": "SPX_state_gamma_zero" }
+    { "hub": "v2_classic", "group": "SPX_classic_gex_full" },
+    { "hub": "v2_classic", "group": "SPX_spot" },
+    { "hub": "v2_state_gex", "group": "NDX_state_gex_full" },
+    { "hub": "v2_state_gex", "group": "NDX_spot" },
+    { "hub": "v2_state_greeks_zero", "group": "SPX_state_gamma_zero" },
+    { "hub": "v2_state_greeks_zero", "group": "SPX_spot" }
   ]
 }
 ```
 
-PATCH is a full replacement. Any active group omitted from the PATCH payload is removed.
+Any membership omitted from the PATCH body is removed.
+`main.py` generates the complete PATCH body from the analytics configuration.
 
-## 6. Run
+## 7. Spot decoding
+
+Spot arrives as a `google.protobuf.Any` envelope with this type URL:
+
+```text
+proto.spot
+```
+
+The compressed value contains `spot_price.SpotPrice`:
+
+```text
+timestamp
+ticker
+spot
+source_timestamp_ms
+```
+
+The wire `spot` value is multiplied by 100.
+`decompress_spot_message` converts it back to the decimal price.
+
+Analytics and spot for one calculation use the same ticker and timestamp.
+Do not depend on message arrival order.
+Cache either message briefly if the application must combine them.
+
+The sample scripts print spot independently from analytics.
+
+## 8. Run the POST and PATCH example
 
 ```bash
 python main.py
 ```
 
-## 7. Quant Discovery Example
+`main.py`:
 
-`multi.py` demonstrates a standard Quant discovery flow:
+- Adds matching spot groups automatically.
+- Selects V2 hubs.
+- Opens one connection for each returned V2 hub.
+- Prints analytics and spot messages separately.
+- Replaces the complete group set after the configured delay.
 
-1. Query `/v2/tickers` and select `SPX` and `NDX`.
-2. Confirm `gex_full` from `/classic/categories`, plus `gex_full` and `gamma_zero` from `/state/categories`.
-3. Query `https://api.gex.bot/tickers/quant` and select the first five Quant tickers.
-4. Query `/v2/options/{ticker}/expiries` for those Quant tickers.
-5. Subscribe every selected ticker to Classic `gex_full` and State `gex_full`.
-6. Subscribe to standard State `gamma_zero` on `state_greeks_zero` for SPX/NDX and explicit `gamma_YYYYMMDD` groups on `state_greeks` for the next three valid Quant expirations.
-
-Classic messages display only `zero_gamma`. State GEX messages display `major_positive` and `major_negative` from the payload's `major_pos_vol` and `major_neg_vol` fields. State gamma option-profile messages display `major_long_gamma` and `major_short_gamma`.
-
-With two standard tickers, five Quant tickers, and three expirations per Quant ticker, this selects 31 of the 150 permitted groups.
+## 9. Run the Quant discovery example
 
 ```bash
 python multi.py
+```
+
+`multi.py`:
+
+1. Selects `SPX` and `NDX` from `/v2/tickers`.
+2. Confirms the required Classic and State categories.
+3. Selects five supplemental Quant tickers.
+4. Gets the next three valid expirations for each supplemental ticker.
+5. Builds Classic, State GEX, standard gamma, and explicit gamma analytics groups.
+6. Adds one matching spot membership per ticker and V2 hub.
+7. Negotiates and opens the selected V2 connections.
+8. Prints analytics and spot messages separately.
+
+With two standard tickers, five supplemental tickers, and three expirations per supplemental ticker, the example selects:
+
+- 31 analytics memberships.
+- 21 colocated spot memberships.
+- 52 total memberships from the Quant limit of 150.
+
+The POST body contains fewer spot names because it sends each ticker spot name once.
+The backend expands that name onto each applicable V2 hub.
+
+## 10. Run tests
+
+Compile the Protocol Buffer definitions first.
+Then run:
+
+```bash
+python -m unittest test_group_config.py test_decompression_utils.py
 ```

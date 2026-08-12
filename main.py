@@ -28,6 +28,13 @@ from decompression_utils import (
     decompress_gex_message,
     decompress_greek_message,
     decompress_orderflow_message,
+    decompress_spot_message,
+)
+from group_config import (
+    add_colocated_spot_groups,
+    build_patch_groups,
+    build_post_groups,
+    count_group_memberships,
 )
 
 # --- Configuration ---
@@ -54,72 +61,67 @@ def load_dotenv_file(path: Path) -> None:
 
 load_dotenv_file(SCRIPT_DIR / ".env")
 
-API_KEY = os.environ.get("GEXBOT_API_KEY", "")
-USER_AGENT = os.environ.get("GEXBOT_USER_AGENT", "")
-BASE_URL = os.environ.get("BASE_URL", "https://api.gex.bot/v2")
+
+def required_environment_variable(name: str) -> str:
+    """Return one required environment variable or raise a clear error."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"{name} is required and must not be empty.")
+    return value.strip()
+
+
+API_KEY = required_environment_variable("GEXBOT_API_KEY")
+USER_AGENT = required_environment_variable("GEXBOT_USER_AGENT")
+BASE_URL = required_environment_variable("BASE_URL").rstrip("/")
 NEGOTIATE_URL = f"{BASE_URL}/negotiate"
 
-# POST /negotiate initial groups. Group names are unprefixed:
-# {ticker}_{package}_{category}
-INITIAL_GROUP_CONFIG: Dict[str, List[str]] = {
-    "classic": [],
-    "state_gex": [
+# Configure analytics only. The client adds one matching {ticker}_spot group to
+# each V2 hub so analytics and spot use separate groups on the same connection.
+INITIAL_ANALYTICS_GROUP_CONFIG: Dict[str, List[str]] = {
+    "v2_classic": [],
+    "v2_state_gex": [
         "SPX_state_gex_full",
         "SPX_state_gex_zero",
     ],
-    "state_greeks_zero": [
+    "v2_state_greeks_zero": [
         "SPX_state_gamma_zero",
     ],
-    "state_greeks_one": [],
-    "orderflow": [],
+    "v2_state_greeks_one": [],
+    "v2_orderflow": [],
 }
 
-# PATCH /negotiate replacement groups. This is a full replacement: any group not
-# included here is removed from the active subscription set.
-UPDATED_GROUP_CONFIG: Dict[str, List[str]] = {
-    "classic": [
+# PATCH /negotiate is a full replacement. The generated payload includes the
+# complete analytics and colocated spot membership set.
+UPDATED_ANALYTICS_GROUP_CONFIG: Dict[str, List[str]] = {
+    "v2_classic": [
         "SPX_classic_gex_full",
     ],
-    "state_gex": [
+    "v2_state_gex": [
         "NDX_state_gex_full",
     ],
-    "state_greeks_zero": [
+    "v2_state_greeks_zero": [
         "SPX_state_delta_zero",
         "SPX_state_gamma_zero",
     ],
-    "state_greeks_one": [],
-    "orderflow": [],
+    "v2_state_greeks_one": [],
+    "v2_orderflow": [],
 }
 
 # Set to 0 to skip the PATCH replacement example.
 PATCH_UPDATE_AFTER_SECONDS = 20
 
 
-def flatten_group_config(group_config: Dict[str, List[str]]) -> List[str]:
-    """Flatten hub -> groups for POST /negotiate."""
-    return [group for groups in group_config.values() for group in groups]
-
-
-def build_group_update_payload(group_config: Dict[str, List[str]]) -> List[Dict[str, str]]:
-    """Build hub-qualified groups for PATCH /negotiate."""
-    return [
-        {"hub": hub_key, "group": group}
-        for hub_key, groups in group_config.items()
-        for group in groups
-    ]
-
-
-def print_group_config(title: str, group_config: Dict[str, List[str]]):
+def print_group_config(title: str, group_config: Dict[str, List[str]]) -> None:
+    """Print the final analytics and spot memberships for each V2 hub."""
     print(f"\n--- {title} ---")
-    total = 0
     for hub_key, groups in group_config.items():
-        total += len(groups)
         if groups:
             print(f"[{hub_key}] {', '.join(groups)}")
-    print(f"Total groups: {total}")
+    print(f"Total hub memberships: {count_group_memberships(group_config)}")
 
 
 def build_auth_headers(api_key: str, user_agent: str) -> Dict[str, str]:
+    """Build the required API authorization and content-negotiation headers."""
     if not api_key or api_key == "your_api_key_here":
         raise ValueError("GEXBOT_API_KEY is not set.")
 
@@ -133,8 +135,11 @@ def build_auth_headers(api_key: str, user_agent: str) -> Dict[str, str]:
     }
 
 
-def post_negotiate(api_key: str, user_agent: str, group_config: Dict[str, List[str]]) -> Dict:
-    groups = flatten_group_config(group_config)
+def post_negotiate(
+    api_key: str, user_agent: str, group_config: Dict[str, List[str]]
+) -> Dict:
+    """Negotiate V2 connections with analytics and one spot request per ticker."""
+    groups = build_post_groups(group_config)
     if not groups:
         raise ValueError("No initial websocket groups configured.")
 
@@ -147,8 +152,11 @@ def post_negotiate(api_key: str, user_agent: str, group_config: Dict[str, List[s
     return response.json()
 
 
-def patch_replace_groups(api_key: str, user_agent: str, group_config: Dict[str, List[str]]) -> Dict:
-    groups = build_group_update_payload(group_config)
+def patch_replace_groups(
+    api_key: str, user_agent: str, group_config: Dict[str, List[str]]
+) -> Dict:
+    """Replace all V2 analytics and colocated spot memberships."""
+    groups = build_patch_groups(group_config)
     headers = build_auth_headers(api_key, user_agent)
     payload = {"groups": groups}
 
@@ -162,6 +170,7 @@ class WebPubSubClientManager:
     """Manages one Azure Web PubSub hub connection."""
 
     def __init__(self, hub_key: str, connection_url: str, subscribed_groups: List[str]):
+        """Create one manager for a signed V2 hub connection URL."""
         self.hub_key = hub_key
         self.subscribed_groups = subscribed_groups
         self.client = WebPubSubClient(connection_url)
@@ -172,27 +181,34 @@ class WebPubSubClientManager:
         self.client.subscribe(CallbackType.GROUP_MESSAGE, self.on_group_message)
 
     def start(self):
+        """Open the managed connection on a background thread."""
         print(f"[{self.hub_key}] Starting client...")
         self.thread = threading.Thread(target=self.client.open, daemon=True)
         self.thread.start()
 
     def stop(self):
+        """Close the managed connection."""
         print(f"[{self.hub_key}] Stopping client...")
         self.client.close()
 
     def update_subscribed_groups(self, subscribed_groups: List[str]):
+        """Update the local membership labels after a successful PATCH request."""
         self.subscribed_groups = subscribed_groups
-        print(f"[{self.hub_key}] Active groups now: {', '.join(subscribed_groups) or 'none'}")
+        active_groups = ", ".join(subscribed_groups) or "none"
+        print(f"[{self.hub_key}] Active groups now: {active_groups}")
 
     def on_connected(self, event: OnConnectedArgs):
+        """Report a successful Web PubSub connection."""
         print(f"[{self.hub_key}] ✅ connected (ID: {event.connection_id})")
         if self.subscribed_groups:
             print(f"[{self.hub_key}] subscribed: {', '.join(self.subscribed_groups)}")
 
     def on_disconnected(self, event: OnDisconnectedArgs):
+        """Report a closed Web PubSub connection."""
         print(f"[{self.hub_key}] ❌ disconnected: {event.message}")
 
     def on_group_message(self, event: OnGroupDataMessageArgs):
+        """Decode and print one analytics or spot group message."""
         try:
             any_message = any_pb2.Any()
             any_message.ParseFromString(event.data)
@@ -205,22 +221,37 @@ class WebPubSubClientManager:
                     current_category = event.group.split(separator)[-1]
                     break
 
+            if "proto.spot" in message_type_url:
+                spot_data = decompress_spot_message(any_message)
+                print(
+                    f"[{self.hub_key}] SPOT: {spot_data.get('ticker')} "
+                    f"@ {spot_data.get('spot')} timestamp={spot_data.get('timestamp')}"
+                )
+                return
+
             if "proto.gex" in message_type_url:
                 gex_data = decompress_gex_message(any_message)
                 if gex_data:
-                    print(f"[{self.hub_key}] GEX: {gex_data.get('ticker')} @ {gex_data.get('spot')}")
+                    ticker = gex_data.get("ticker")
+                    timestamp = gex_data.get("timestamp")
+                    print(f"[{self.hub_key}] GEX: {ticker} timestamp={timestamp}")
                 return
 
             if "proto.greek" in message_type_url:
                 greek_data = decompress_greek_message(any_message, current_category)
                 if greek_data:
-                    print(f"[{self.hub_key}] {current_category}: {greek_data.get('ticker')}")
+                    ticker = greek_data.get("ticker")
+                    print(f"[{self.hub_key}] {current_category}: {ticker}")
                 return
 
             if "proto.orderflow" in message_type_url:
                 orderflow_data = decompress_orderflow_message(any_message)
                 if orderflow_data:
-                    print(f"[{self.hub_key}] Orderflow: {orderflow_data.get('spot')}")
+                    print(
+                        f"[{self.hub_key}] Orderflow: "
+                        f"{orderflow_data.get('ticker')} "
+                        f"timestamp={orderflow_data.get('timestamp')}"
+                    )
                 return
 
             print(f"[{self.hub_key}] Unknown message type_url: {message_type_url}")
@@ -228,18 +259,28 @@ class WebPubSubClientManager:
             print(f"[{self.hub_key}] Failed to parse message: {exc}")
 
 
-def start_clients(websocket_urls: Dict[str, str], group_config: Dict[str, List[str]]) -> Dict[str, WebPubSubClientManager]:
+def start_clients(
+    websocket_urls: Dict[str, str], group_config: Dict[str, List[str]]
+) -> Dict[str, WebPubSubClientManager]:
+    """Open one managed client for each returned V2 hub URL."""
     managers: Dict[str, WebPubSubClientManager] = {}
 
     for hub_key, url in websocket_urls.items():
-        manager = WebPubSubClientManager(hub_key, url, group_config.get(hub_key, []))
+        manager = WebPubSubClientManager(
+            hub_key,
+            url,
+            group_config.get(hub_key, []),
+        )
         manager.start()
         managers[hub_key] = manager
 
     return managers
 
 
-def update_manager_labels(managers: Dict[str, WebPubSubClientManager], group_config: Dict[str, List[str]]):
+def update_manager_labels(
+    managers: Dict[str, WebPubSubClientManager], group_config: Dict[str, List[str]]
+):
+    """Apply successful PATCH membership labels to all managed clients."""
     for hub_key, manager in managers.items():
         manager.update_subscribed_groups(group_config.get(hub_key, []))
 
@@ -248,25 +289,33 @@ if __name__ == "__main__":
     client_managers: Dict[str, WebPubSubClientManager] = {}
 
     try:
-        print_group_config("Initial POST groups", INITIAL_GROUP_CONFIG)
-        negotiate_data = post_negotiate(API_KEY, USER_AGENT, INITIAL_GROUP_CONFIG)
+        initial_group_config = add_colocated_spot_groups(INITIAL_ANALYTICS_GROUP_CONFIG)
+        updated_group_config = add_colocated_spot_groups(UPDATED_ANALYTICS_GROUP_CONFIG)
+
+        print_group_config("Initial POST memberships", initial_group_config)
+        negotiate_data = post_negotiate(API_KEY, USER_AGENT, initial_group_config)
 
         websocket_urls = negotiate_data.get("websocket_urls")
         if not websocket_urls:
             raise RuntimeError("No websocket_urls returned from negotiate.")
 
         print("\n--- Starting WebSocket clients ---")
-        client_managers = start_clients(websocket_urls, INITIAL_GROUP_CONFIG)
+        client_managers = start_clients(websocket_urls, initial_group_config)
 
         if PATCH_UPDATE_AFTER_SECONDS > 0:
-            print(f"\nWaiting {PATCH_UPDATE_AFTER_SECONDS}s before PATCH group replacement example...")
+            print(
+                "\nWaiting "
+                f"{PATCH_UPDATE_AFTER_SECONDS}s before the PATCH replacement example..."
+            )
             time.sleep(PATCH_UPDATE_AFTER_SECONDS)
 
-            print_group_config("PATCH replacement groups", UPDATED_GROUP_CONFIG)
-            update_result = patch_replace_groups(API_KEY, USER_AGENT, UPDATED_GROUP_CONFIG)
+            print_group_config("PATCH replacement memberships", updated_group_config)
+            update_result = patch_replace_groups(
+                API_KEY, USER_AGENT, updated_group_config
+            )
             print("PATCH replacement result:")
             print(json.dumps(update_result, indent=2))
-            update_manager_labels(client_managers, UPDATED_GROUP_CONFIG)
+            update_manager_labels(client_managers, updated_group_config)
 
         print("\nClients are running. Press Ctrl+C to stop.")
         while True:

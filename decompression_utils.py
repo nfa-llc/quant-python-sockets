@@ -8,12 +8,34 @@ from google.protobuf import any_pb2
 import generated_proto.gex_pb2 as gex_pb2
 import generated_proto.option_profile_pb2 as option_profile_pb2
 import generated_proto.orderflow_pb2 as orderflow_pb2
+import generated_proto.spot_price_pb2 as spot_price_pb2
+
 # ------------------------------------
 
 # --- Zstandard Decompressor ---
 # Create a single reusable decompression context
 DCTX = zstandard.ZstdDecompressor()
 # ------------------------------
+
+
+def decompress_spot_message(any_message: any_pb2.Any) -> Dict:
+    """Decompress and decode a spot message from one protobuf Any envelope."""
+    with DCTX.stream_reader(any_message.value) as reader:
+        decompressed_bytes = reader.read()
+
+    decoded_proto = spot_price_pb2.SpotPrice()
+    decoded_proto.ParseFromString(decompressed_bytes)
+
+    return {
+        "timestamp": decoded_proto.timestamp,
+        "ticker": decoded_proto.ticker,
+        "spot": (decoded_proto.spot or 0) / 100.0,
+        "source_timestamp_ms": (
+            decoded_proto.source_timestamp_ms
+            if decoded_proto.HasField("source_timestamp_ms")
+            else None
+        ),
+    }
 
 
 def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
@@ -47,22 +69,22 @@ def decompress_gex_message(any_message: any_pb2.Any) -> Dict:
                 (s.value_1 or 0) / 100.0,
                 (s.value_2 or 0) / 100.0,
                 # Assumes s.priors is a message with a 'values' field
-                [v /
-                    100.0 for v in s.priors.values] if s.HasField("priors") else []
+                [v / 100.0 for v in s.priors.values] if s.HasField("priors") else [],
             ]
             for s in decoded_proto.strikes
         ],
         "sum_gex_vol": (decoded_proto.sum_gex_vol or 0) / 1000.0,
         "sum_gex_oi": (decoded_proto.sum_gex_oi or 0) / 1000.0,
         "delta_risk_reversal": (decoded_proto.delta_risk_reversal or 0) / 1000.0,
-        "max_priors": [
+        "max_priors": (
             [
-                (t.first_value or 0) / 100.0,
-                (t.second_value or 0) / 1000.0
+                [(t.first_value or 0) / 100.0, (t.second_value or 0) / 1000.0]
+                # Assumes max_priors is a message with a 'tuples' field
+                for t in decoded_proto.max_priors.tuples
             ]
-            # Assumes max_priors is a message with a 'tuples' field
-            for t in decoded_proto.max_priors.tuples
-        ] if decoded_proto.HasField("max_priors") else [],
+            if decoded_proto.HasField("max_priors")
+            else []
+        ),
     }
 
     return classic_gex
@@ -79,9 +101,9 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
         decompressed_bytes = reader.read()
 
     # 2. Conditionally deserialize
-    if current_category in ('volume_zero', 'volume_one'):
+    if current_category in ("volume_zero", "volume_one"):
         # --- JSON Deserialization Path ---
-        json_string = decompressed_bytes.decode('utf-8')
+        json_string = decompressed_bytes.decode("utf-8")
         raw_profile = json.loads(json_string)
 
         live_contracts = {
@@ -134,8 +156,11 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
                     [(v or 0) / 100.0 for v in mc.call_cvolume_priors],
                     mc.put_cvolume or 0,
                     # Assumes put_cvolume_priors is a message with 'values'
-                    [v for v in mc.put_cvolume_priors.values] if mc.HasField(
-                        "put_cvolume_priors") else [],
+                    (
+                        [v for v in mc.put_cvolume_priors.values]
+                        if mc.HasField("put_cvolume_priors")
+                        else []
+                    ),
                 ]
                 for mc in decoded_proto.mini_contracts
             ],
@@ -144,6 +169,7 @@ def decompress_greek_message(any_message: any_pb2.Any, current_category: str) ->
 
 
 def decompress_orderflow_message(any_message: any_pb2.Any) -> Dict:
+    """Decompress and decode an Orderflow message from one protobuf Any envelope."""
     compressed_bytes = any_message.value
     with DCTX.stream_reader(compressed_bytes) as reader:
         decompressed_bytes = reader.read()
@@ -155,42 +181,40 @@ def decompress_orderflow_message(any_message: any_pb2.Any) -> Dict:
         "timestamp": p.timestamp,
         "ticker": p.ticker,
         "spot": (p.spot or 0) / 100.0,
-        "zero_major_long_gamma":  (p.zero_major_long_gamma or 0) / 100.0,
+        "zero_major_long_gamma": (p.zero_major_long_gamma or 0) / 100.0,
         "zero_major_short_gamma": (p.zero_major_short_gamma or 0) / 100.0,
-        "one_major_long_gamma":   (p.one_major_long_gamma or 0) / 100.0,
-        "one_major_short_gamma":  (p.one_major_short_gamma or 0) / 100.0,
-        "zero_major_call_gamma":  (p.zero_major_call_gamma or 0) / 100.0,
-        "zero_major_put_gamma":   (p.zero_major_put_gamma or 0) / 100.0,
-        "one_major_call_gamma":   (p.one_major_call_gamma or 0) / 100.0,
-        "one_major_put_gamma":    (p.one_major_put_gamma or 0) / 100.0,
-
+        "one_major_long_gamma": (p.one_major_long_gamma or 0) / 100.0,
+        "one_major_short_gamma": (p.one_major_short_gamma or 0) / 100.0,
+        "zero_major_call_gamma": (p.zero_major_call_gamma or 0) / 100.0,
+        "zero_major_put_gamma": (p.zero_major_put_gamma or 0) / 100.0,
+        "one_major_call_gamma": (p.one_major_call_gamma or 0) / 100.0,
+        "one_major_put_gamma": (p.one_major_put_gamma or 0) / 100.0,
         # state — all x100 on the wire
         "zero_convexity_ratio": p.zero_convexity_ratio / 100.0,
-        "one_convexity_ratio":  p.one_convexity_ratio / 100.0,
-        "zero_gex_ratio":       p.zero_gex_ratio / 100.0,
-        "one_gex_ratio":        p.one_gex_ratio / 100.0,
-        "zero_net_vanna":       p.zero_net_vanna / 100.0,
-        "one_net_vanna":        p.one_net_vanna / 100.0,
-        "zero_net_charm":       p.zero_net_charm / 100.0,
-        "one_net_charm":        p.one_net_charm / 100.0,
-        "zero_agg_total_dex":   p.zero_agg_total_dex / 100.0,
-        "one_agg_total_dex":    p.one_agg_total_dex / 100.0,
-        "zero_agg_call_dex":    p.zero_agg_call_dex / 100.0,
-        "one_agg_call_dex":     p.one_agg_call_dex / 100.0,
-        "zero_agg_put_dex":     p.zero_agg_put_dex / 100.0,
-        "one_agg_put_dex":      p.one_agg_put_dex / 100.0,
-        "zero_net_total_dex":   p.zero_net_total_dex / 100.0,
-        "one_net_total_dex":    p.one_net_total_dex / 100.0,
-        "zero_net_call_dex":    p.zero_net_call_dex / 100.0,
-        "one_net_call_dex":     p.one_net_call_dex / 100.0,
-        "zero_net_put_dex":     p.zero_net_put_dex / 100.0,
-        "one_net_put_dex":      p.one_net_put_dex / 100.0,
-
+        "one_convexity_ratio": p.one_convexity_ratio / 100.0,
+        "zero_gex_ratio": p.zero_gex_ratio / 100.0,
+        "one_gex_ratio": p.one_gex_ratio / 100.0,
+        "zero_net_vanna": p.zero_net_vanna / 100.0,
+        "one_net_vanna": p.one_net_vanna / 100.0,
+        "zero_net_charm": p.zero_net_charm / 100.0,
+        "one_net_charm": p.one_net_charm / 100.0,
+        "zero_agg_total_dex": p.zero_agg_total_dex / 100.0,
+        "one_agg_total_dex": p.one_agg_total_dex / 100.0,
+        "zero_agg_call_dex": p.zero_agg_call_dex / 100.0,
+        "one_agg_call_dex": p.one_agg_call_dex / 100.0,
+        "zero_agg_put_dex": p.zero_agg_put_dex / 100.0,
+        "one_agg_put_dex": p.one_agg_put_dex / 100.0,
+        "zero_net_total_dex": p.zero_net_total_dex / 100.0,
+        "one_net_total_dex": p.one_net_total_dex / 100.0,
+        "zero_net_call_dex": p.zero_net_call_dex / 100.0,
+        "one_net_call_dex": p.one_net_call_dex / 100.0,
+        "zero_net_put_dex": p.zero_net_put_dex / 100.0,
+        "one_net_put_dex": p.one_net_put_dex / 100.0,
         # orderflow — also x100 on the wire
-        "dex_orderflow":           p.dex_orderflow / 100.0,
-        "gex_orderflow":           p.gex_orderflow / 100.0,
-        "convexity_orderflow":     p.convexity_orderflow / 100.0,
-        "one_dex_orderflow":       p.one_dex_orderflow / 100.0,
-        "one_gex_orderflow":       p.one_gex_orderflow / 100.0,
+        "dex_orderflow": p.dex_orderflow / 100.0,
+        "gex_orderflow": p.gex_orderflow / 100.0,
+        "convexity_orderflow": p.convexity_orderflow / 100.0,
+        "one_dex_orderflow": p.one_dex_orderflow / 100.0,
+        "one_gex_orderflow": p.one_gex_orderflow / 100.0,
         "one_convexity_orderflow": p.one_convexity_orderflow / 100.0,
     }

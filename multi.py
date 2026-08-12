@@ -15,14 +15,17 @@ This follows a typical Quant user flow:
 1. Query the standard ticker list and choose SPX/NDX.
 2. Confirm the Classic gex_full and State gex_full/gamma_zero categories.
 3. Query the Quant ticker list and choose the first five supplemental tickers.
-4. Query each selected Quant ticker's valid expirations within the published 90-day horizon.
+4. Query each selected Quant ticker's valid expirations within the published
+   90-day horizon.
 5. Subscribe to:
    - Classic gex_full for every selected ticker, which supplies zero_gamma
    - State gex_full for every selected ticker, which supplies major positive/negative
    - State gamma_zero for SPX/NDX
    - State gamma profiles for the next three valid expirations of each Quant ticker,
      which supply major_long_gamma and major_short_gamma
+   - One matching {ticker}_spot group on each V2 hub used by that ticker
 
+Analytics and spot use separate groups on the same V2 connection.
 Groups are joined server-side by POST /v2/negotiate. The client should not send
 Azure joinGroup messages when using this flow.
 """
@@ -44,7 +47,16 @@ from azure.messaging.webpubsubclient.models import (
 )
 from google.protobuf import any_pb2
 
-from decompression_utils import decompress_gex_message, decompress_greek_message
+from decompression_utils import (
+    decompress_gex_message,
+    decompress_greek_message,
+    decompress_spot_message,
+)
+from group_config import (
+    add_colocated_spot_groups,
+    build_post_groups,
+    count_group_memberships,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -52,10 +64,10 @@ STANDARD_PROFILE_TICKERS = ["SPX", "NDX"]
 CLASSIC_GEX_CATEGORY = "gex_full"
 STATE_GEX_CATEGORY = "gex_full"
 STANDARD_STATE_GAMMA_CATEGORY = "gamma_zero"
-CLASSIC_HUB = "classic"
-STATE_GEX_HUB = "state_gex"
-STANDARD_STATE_GAMMA_HUB = "state_greeks_zero"
-EXPIRY_STATE_GAMMA_HUB = "state_greeks"
+CLASSIC_HUB = "v2_classic"
+STATE_GEX_HUB = "v2_state_gex"
+STANDARD_STATE_GAMMA_HUB = "v2_state_greeks_zero"
+EXPIRY_STATE_GAMMA_HUB = "v2_state_greeks"
 QUANT_TICKER_COUNT = 5
 EXPIRATIONS_PER_QUANT_TICKER = 3
 QUANT_GROUP_LIMIT = 150
@@ -81,22 +93,17 @@ def load_dotenv_file(path: Path) -> None:
 load_dotenv_file(SCRIPT_DIR / ".env")
 
 
-def first_env(*names: str, default: str = "") -> str:
-    for name in names:
-        value = os.environ.get(name)
-        if value and value.strip():
-            return value.strip()
-    return default
+def required_environment_variable(name: str) -> str:
+    """Return one required environment variable or raise a clear error."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"{name} is required and must not be empty.")
+    return value.strip()
 
 
-RAW_BASE_URL = first_env(
-    "QUANT_API_BASE_URL",
-    "BASE_URL",
-    "GEXBOT_API_BASE_URL",
-    default="https://api.gex.bot/v2",
-)
-API_KEY = first_env("QUANT_API_KEY", "GEXBOT_API_KEY", "INTERNAL_DEV_API_KEY")
-USER_AGENT = first_env("GEXBOT_USER_AGENT", default="quant-sockets-multi/1.0")
+RAW_BASE_URL = required_environment_variable("BASE_URL")
+API_KEY = required_environment_variable("GEXBOT_API_KEY")
+USER_AGENT = required_environment_variable("GEXBOT_USER_AGENT")
 
 
 def api_roots(raw_base_url: str) -> Tuple[str, str]:
@@ -116,18 +123,21 @@ NEGOTIATE_URL = f"{V2_BASE_URL}/negotiate"
 
 
 def expirations_url(ticker: str) -> str:
+    """Build the V2 expiration-discovery URL for one ticker."""
     return f"{V2_BASE_URL}/options/{ticker}/expiries"
 
 
 def build_auth_headers(content_type_json: bool = False) -> Dict[str, str]:
+    """Build the required API headers for a JSON or read request."""
     if not API_KEY or API_KEY == "your_api_key_here":
-        raise ValueError(
-            "Set QUANT_API_KEY or GEXBOT_API_KEY to a Quant-capable API key."
-        )
+        raise ValueError("GEXBOT_API_KEY is not set.")
+
+    if not USER_AGENT.strip():
+        raise ValueError("GEXBOT_USER_AGENT is not set.")
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "User-Agent": USER_AGENT,
+        "User-Agent": USER_AGENT.strip(),
         "Accept": "application/json",
     }
     if content_type_json:
@@ -136,6 +146,7 @@ def build_auth_headers(content_type_json: bool = False) -> Dict[str, str]:
 
 
 def get_json(url: str) -> Dict:
+    """Get and decode one authenticated JSON response."""
     print(f"GET {url}")
     response = requests.get(url, headers=build_auth_headers(), timeout=30)
     if not response.ok:
@@ -144,7 +155,9 @@ def get_json(url: str) -> Dict:
     return response.json()
 
 
-def post_negotiate(groups: List[str]) -> Dict:
+def post_negotiate(group_config: Dict[str, List[str]]) -> Dict:
+    """Negotiate V2 connections with analytics and one spot request per ticker."""
+    groups = build_post_groups(group_config)
     payload = {"groups": groups}
     print(f"\nPOST {NEGOTIATE_URL} with {len(groups)} group(s)")
     response = requests.post(
@@ -160,6 +173,7 @@ def post_negotiate(groups: List[str]) -> Dict:
 
 
 def normalize_tickers(payload: Dict) -> List[str]:
+    """Return a stable and deduplicated ticker list from a discovery response."""
     tickers: List[str] = []
     for key in ("stocks", "indexes", "futures", "pubsub_only"):
         values = payload.get(key) or []
@@ -178,10 +192,12 @@ def normalize_tickers(payload: Dict) -> List[str]:
 
 
 def to_yyyymmdd(expiration: str) -> str:
+    """Convert one ISO expiration date to a WebSocket group suffix."""
     return expiration.replace("-", "")
 
 
 def select_standard_profile_tickers() -> List[str]:
+    """Select the configured standard tickers from the public ticker response."""
     payload = get_json(STANDARD_TICKERS_URL)
     available = set(normalize_tickers(payload))
     selected = [ticker for ticker in STANDARD_PROFILE_TICKERS if ticker in available]
@@ -204,6 +220,7 @@ def select_standard_profile_tickers() -> List[str]:
 def confirm_categories(
     package_name: str, url: str, expected_categories: List[str]
 ) -> None:
+    """Confirm that one package advertises all categories used by the example."""
     payload = get_json(url)
     if not isinstance(payload, list):
         raise RuntimeError(f"{package_name} categories response was not a list.")
@@ -220,6 +237,7 @@ def confirm_categories(
 
 
 def select_quant_tickers() -> List[str]:
+    """Select a bounded set of supplemental Quant tickers."""
     payload = get_json(QUANT_TICKERS_URL)
     print("\nQuant ticker response:")
     print(json.dumps(payload, indent=2))
@@ -234,6 +252,7 @@ def select_quant_tickers() -> List[str]:
 
 
 def fetch_next_expirations(tickers: List[str]) -> Dict[str, List[str]]:
+    """Get the next configured number of valid expirations for each ticker."""
     expirations_by_ticker: Dict[str, List[str]] = {}
 
     print("\nNext valid expirations for selected Quant tickers:")
@@ -254,6 +273,7 @@ def build_group_config(
     standard_tickers: List[str],
     quant_expirations: Dict[str, List[str]],
 ) -> Dict[str, List[str]]:
+    """Build V2 analytics and colocated spot memberships for the example."""
     all_tickers = list(dict.fromkeys([*standard_tickers, *quant_expirations.keys()]))
     classic_groups = [
         f"{ticker}_classic_{CLASSIC_GEX_CATEGORY}" for ticker in all_tickers
@@ -268,33 +288,35 @@ def build_group_config(
 
     for ticker, expirations in quant_expirations.items():
         for expiration in expirations:
-            expiry_state_gamma_groups.append(f"{ticker}_state_gamma_{to_yyyymmdd(expiration)}")
+            expiry_state_gamma_groups.append(
+                f"{ticker}_state_gamma_{to_yyyymmdd(expiration)}"
+            )
 
-    return {
+    analytics_group_config = {
         CLASSIC_HUB: classic_groups,
         STATE_GEX_HUB: state_gex_groups,
         STANDARD_STATE_GAMMA_HUB: standard_state_gamma_groups,
         EXPIRY_STATE_GAMMA_HUB: expiry_state_gamma_groups,
     }
-
-
-def flatten_group_config(group_config: Dict[str, List[str]]) -> List[str]:
-    return [group for groups in group_config.values() for group in groups]
+    return add_colocated_spot_groups(analytics_group_config)
 
 
 def print_group_config(group_config: Dict[str, List[str]]) -> None:
-    print("\nGroups selected for POST /v2/negotiate:")
-    total = 0
+    """Print analytics and spot memberships for each selected V2 hub."""
+    print("\nV2 memberships selected for POST /v2/negotiate:")
     for hub, groups in group_config.items():
-        total += len(groups)
         print(f"  [{hub}]")
         for group in groups:
             print(f"    {group}")
-    print(f"Total groups: {total}/{QUANT_GROUP_LIMIT}")
+    print(
+        f"Total hub memberships: "
+        f"{count_group_memberships(group_config)}/{QUANT_GROUP_LIMIT}"
+    )
 
 
 class WebPubSubClientManager:
     def __init__(self, hub_key: str, connection_url: str, subscribed_groups: List[str]):
+        """Create one manager for a signed V2 hub connection URL."""
         self.hub_key = hub_key
         self.subscribed_groups = subscribed_groups
         self.client = WebPubSubClient(connection_url)
@@ -305,22 +327,27 @@ class WebPubSubClientManager:
         self.client.subscribe(CallbackType.GROUP_MESSAGE, self.on_group_message)
 
     def start(self) -> None:
+        """Open the managed connection on a background thread."""
         print(f"[{self.hub_key}] starting client")
         self.thread = threading.Thread(target=self.client.open, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
+        """Close the managed connection."""
         print(f"[{self.hub_key}] stopping client")
         self.client.close()
 
     def on_connected(self, event: OnConnectedArgs) -> None:
+        """Report a successful Web PubSub connection."""
         print(f"[{self.hub_key}] ✅ connected (ID: {event.connection_id})")
         print(f"[{self.hub_key}] subscribed: {', '.join(self.subscribed_groups)}")
 
     def on_disconnected(self, event: OnDisconnectedArgs) -> None:
+        """Report a closed Web PubSub connection."""
         print(f"[{self.hub_key}] ❌ disconnected: {event.message}")
 
     def on_group_message(self, event: OnGroupDataMessageArgs) -> None:
+        """Decode and print one analytics or spot group message."""
         try:
             any_message = any_pb2.Any()
             any_message.ParseFromString(event.data)
@@ -332,6 +359,15 @@ class WebPubSubClientManager:
                 if separator in event.group:
                     current_category = event.group.split(separator, 1)[-1]
                     break
+
+            if "proto.spot" in message_type_url:
+                spot_data = decompress_spot_message(any_message)
+                print(
+                    f"[{self.hub_key}] {event.group}: "
+                    f"{spot_data.get('ticker')} spot={spot_data.get('spot')} "
+                    f"timestamp={spot_data.get('timestamp')}"
+                )
+                return
 
             if "proto.gex" in message_type_url:
                 gex_data = decompress_gex_message(any_message)
@@ -364,15 +400,15 @@ class WebPubSubClientManager:
 
             print(f"[{self.hub_key}] unknown message type_url: {message_type_url}")
         except Exception as exc:
-            print(
-                f"[{self.hub_key}] failed to parse message from {getattr(event, 'group', '?')}: {exc}"
-            )
+            group = getattr(event, "group", "?")
+            print(f"[{self.hub_key}] failed to parse message from {group}: {exc}")
 
 
 def start_clients(
     websocket_urls: Dict[str, str],
     group_config: Dict[str, List[str]],
 ) -> Dict[str, WebPubSubClientManager]:
+    """Open one managed client for each V2 hub used by the group configuration."""
     managers: Dict[str, WebPubSubClientManager] = {}
 
     for hub_key, groups in group_config.items():
@@ -388,6 +424,7 @@ def start_clients(
 
 
 def main() -> None:
+    """Discover Quant data, negotiate V2 memberships, and print live messages."""
     managers: Dict[str, WebPubSubClientManager] = {}
 
     try:
@@ -405,16 +442,17 @@ def main() -> None:
         quant_expirations = fetch_next_expirations(quant_tickers)
 
         group_config = build_group_config(standard_tickers, quant_expirations)
-        groups = flatten_group_config(group_config)
-        if not groups:
+        membership_count = count_group_memberships(group_config)
+        if membership_count == 0:
             raise RuntimeError("No websocket groups could be built.")
-        if len(groups) > QUANT_GROUP_LIMIT:
+        if membership_count > QUANT_GROUP_LIMIT:
             raise RuntimeError(
-                f"Selected {len(groups)} groups, exceeding the {QUANT_GROUP_LIMIT}-group Quant limit."
+                f"Selected {membership_count} memberships, exceeding the "
+                f"{QUANT_GROUP_LIMIT}-group Quant limit."
             )
 
         print_group_config(group_config)
-        negotiate_data = post_negotiate(groups)
+        negotiate_data = post_negotiate(group_config)
         websocket_urls = negotiate_data.get("websocket_urls")
         if not websocket_urls:
             raise RuntimeError("No websocket_urls returned from negotiate.")
